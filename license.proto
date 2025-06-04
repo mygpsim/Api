@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+message AppInfo {
+  string package_name = 1;
+  string version = 2;
+}
+
+message AnalyzeRequest {
+  string license = 1;
+  AppInfo app = 2;
+  string device_hash = 3;
+  int32 platform = 4;
+}
+
+message LicenseRequest {
+  string walletKey = 1;
+}
